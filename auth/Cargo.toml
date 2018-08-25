@@ -1,9 +1,12 @@
+cargo-features = ["edition"]
+
 [package]
 name = "coreutils_auth"
 license = "MIT"
 version = "0.2.1"
 authors = ["Francesco Cina <ufoscout@gmail.com>"]
 description = "Authorization and Authentication services."
+edition = "2018"
 
 [dependencies]
 failure = "0.1"

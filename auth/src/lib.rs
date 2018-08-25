@@ -1,7 +1,5 @@
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate failure;
 #[macro_use]
 extern crate failure_derive;
 
@@ -15,40 +13,42 @@ pub enum AuthError {
     UnAuthenticatedError {},
     #[fail(display = "NoRequiredRole [{}]", role)]
     NoRequiredRole { role: String },
+    #[fail(display = "NoRequiredResource [{}]", resource)]
+    NoRequiredResource { resource: String },
     #[fail(display = "NoRequiredPermission [{}]", permission)]
     NoRequiredPermission { permission: String },
 }
 
 pub struct AuthService {
-    roles_provider: Box<RolesProvider>
+    roles_provider: Box<dyn RolesProvider>
 }
 
-pub fn new(roles_provider: Box<RolesProvider>) -> AuthService {
+pub fn new(roles_provider: Box<dyn RolesProvider>) -> AuthService {
     AuthService {
         roles_provider
     }
 }
 
 impl AuthService {
-    pub fn auth(&self, auth: model::Auth) -> AuthContext {
+    pub fn auth(&self, auth: model::Auth) -> AuthContext<'_> {
         AuthContext::new(auth, &self.roles_provider)
     }
 }
 
 pub struct AuthContext<'a> {
     pub auth: model::Auth,
-    permissions: Vec<&'a String>
+    permissions: HashMap<&'a model::Resource, &'a Vec<String>>
 }
 
 impl<'a> AuthContext<'a> {
 
-    pub fn new(auth: model::Auth, roles_provider: & Box<RolesProvider>) -> AuthContext {
+    pub fn new(auth: model::Auth, roles_provider: & Box<dyn RolesProvider>) -> AuthContext<'_> {
 
-        let mut permissions = vec![];
+        let mut permissions = HashMap::new();
 
         for role in roles_provider.get_by_name(&auth.roles) {
-            for permission in &role.permissions {
-                permissions.push(permission)
+            for (resource, permission) in role.permissions.iter() {
+                permissions.insert(resource, permission);
             }
         }
 
@@ -58,14 +58,14 @@ impl<'a> AuthContext<'a> {
         }
     }
 
-    pub fn is_authenticated(&self) -> Result<&AuthContext, AuthError> {
+    pub fn is_authenticated(&self) -> Result<&AuthContext<'_>, AuthError> {
         if self.auth.username.is_empty() {
             return Err(AuthError::UnAuthenticatedError {});
         };
         Ok(&self)
     }
 
-    pub fn has_role(&self, role: &str) -> Result<&AuthContext, AuthError> {
+    pub fn has_role(&self, role: &str) -> Result<&AuthContext<'_>, AuthError> {
         self.is_authenticated()?;
         if !self.has_role_bool(&role) {
             return Err(AuthError::NoRequiredRole { role: role.to_string() });
@@ -73,7 +73,7 @@ impl<'a> AuthContext<'a> {
         Ok(&self)
     }
 
-    pub fn has_any_role(&self, roles: &[&str]) -> Result<&AuthContext, AuthError> {
+    pub fn has_any_role(&self, roles: &[&str]) -> Result<&AuthContext<'_>, AuthError> {
         self.is_authenticated()?;
         for role in roles {
             if self.has_role_bool(*role) {
@@ -83,7 +83,7 @@ impl<'a> AuthContext<'a> {
         return Err(AuthError::NoRequiredRole { role: "".to_string() });
     }
 
-    pub fn has_all_roles(&self, roles: &[&str]) -> Result<&AuthContext, AuthError> {
+    pub fn has_all_roles(&self, roles: &[&str]) -> Result<&AuthContext<'_>, AuthError> {
         self.is_authenticated()?;
         for role in roles {
             if !self.has_role_bool(*role) {
@@ -93,28 +93,56 @@ impl<'a> AuthContext<'a> {
         return Ok(&self);
     }
 
-    pub fn has_permission(&self, permission: &str) -> Result<&AuthContext, AuthError> {
+    pub fn has_resource(&self, resource: &str) -> Result<&AuthContext<'_>, AuthError> {
         self.is_authenticated()?;
-        if !self.has_permission_bool(&permission) {
+        if !self.has_resource_bool(&resource) {
+            return Err(AuthError::NoRequiredResource { resource: resource.to_string() });
+        };
+        Ok(&self)
+    }
+
+    pub fn has_any_resource(&self, resources: &[&str]) -> Result<&AuthContext<'_>, AuthError> {
+        self.is_authenticated()?;
+        for resource in resources {
+            if self.has_resource_bool(*resource) {
+                return Ok(&self);
+            };
+        };
+        return Err(AuthError::NoRequiredResource { resource: "".to_string() });
+    }
+
+    pub fn has_all_resources(&self, resources: &[&str]) -> Result<&AuthContext<'_>, AuthError> {
+        self.is_authenticated()?;
+        for resource in resources {
+            if !self.has_resource_bool(*resource) {
+                return Err(AuthError::NoRequiredResource { resource: resource.to_string() });
+            };
+        };
+        return Ok(&self);
+    }
+
+    pub fn has_permission(&self, resource: &model::Resource, permission: &str) -> Result<&AuthContext<'_>, AuthError> {
+        self.is_authenticated()?;
+        if !self.has_permission_bool(resource, permission) {
             return Err(AuthError::NoRequiredPermission { permission: permission.to_string() });
         };
         Ok(&self)
     }
 
-    pub fn has_any_permission(&self, permissions: &[&str]) -> Result<&AuthContext, AuthError> {
+    pub fn has_any_permission(&self, resource: &model::Resource, permissions: &[&str]) -> Result<&AuthContext<'_>, AuthError> {
         self.is_authenticated()?;
         for permission in permissions {
-            if self.has_permission_bool(*permission) {
+            if self.has_permission_bool(resource, *permission) {
                 return Ok(&self);
             };
         };
         return Err(AuthError::NoRequiredPermission { permission: "".to_string() });
     }
 
-    pub fn has_all_permissions(&self, permissions: &[&str]) -> Result<&AuthContext, AuthError> {
+    pub fn has_all_permissions(&self, resource: &model::Resource, permissions: &[&str]) -> Result<&AuthContext<'_>, AuthError> {
         self.is_authenticated()?;
         for permission in permissions {
-            if !self.has_permission_bool(*permission) {
+            if !self.has_permission_bool(resource, *permission) {
                 return Err(AuthError::NoRequiredPermission { permission: permission.to_string() });
             };
         };
@@ -125,8 +153,16 @@ impl<'a> AuthContext<'a> {
         self.auth.roles.contains(&role.to_string())
     }
 
-    fn has_permission_bool(&self, permission: &str) -> bool {
-        self.permissions.contains(&&permission.to_string())
+    fn has_resource_bool(&self, resource: &str) -> bool {
+        self.auth.resources.contains(&resource.to_string())
+    }
+
+    fn has_permission_bool(&self, resource: &model::Resource, permission: &str) -> bool {
+        if let Some(p_over_res) = self.permissions.get(&resource) {
+            p_over_res.contains(&permission.to_string())
+        } else {
+            false
+        }
     }
 }
 
@@ -136,20 +172,31 @@ pub trait RolesProvider: Send + Sync {
     fn get_by_name(&self, names: &Vec<String>) -> Vec<&model::Role>;
 }
 
+pub trait ResourcesProvider: Send + Sync {
+    fn get_all(&self) -> &Vec<model::Resource>;
+
+    fn get_by_name(&self, names: &Vec<String>) -> Vec<&model::Resource>;
+}
+
 pub struct InMemoryRolesProvider {
     all_roles: Vec<model::Role>,
     roles_by_name: HashMap<String, model::Role>,
 }
 
-impl InMemoryRolesProvider {
-    pub fn new(all_roles: Vec<model::Role>) -> InMemoryRolesProvider {
-        let mut provider = InMemoryRolesProvider {
-            all_roles,
-            roles_by_name: HashMap::new(),
+pub struct InMemoryResourcesProvider {
+    all_resources: Vec<model::Resource>,
+    resources_by_name: HashMap<String, model::Resource>,
+}
+
+impl InMemoryResourcesProvider {
+    pub fn new(all_resources: Vec<model::Resource>) -> InMemoryResourcesProvider {
+        let mut provider = InMemoryResourcesProvider {
+            all_resources,
+            resources_by_name: HashMap::new(),
         };
 
-        for role in &provider.all_roles {
-            provider.roles_by_name.insert(role.name.clone(), role.clone());
+        for resource in &provider.all_resources {
+            provider.resources_by_name.insert(resource.name.clone(), resource.clone());
         }
 
         provider
@@ -164,8 +211,24 @@ impl RolesProvider for InMemoryRolesProvider {
     fn get_by_name(&self, names: &Vec<String>) -> Vec<&model::Role> {
         let mut result = vec![];
         for name in names {
-            let roles = self.roles_by_name.get(name);
-            match roles {
+            match self.roles_by_name.get(name) {
+                Some(t) => result.push(t),
+                None => {}
+            }
+        };
+        result
+    }
+}
+
+impl ResourcesProvider for InMemoryResourcesProvider {
+    fn get_all(&self) -> &Vec<model::Resource> {
+        &self.all_resources
+    }
+
+    fn get_by_name(&self, names: &Vec<String>) -> Vec<&model::Resource> {
+        let mut result = vec![];
+        for name in names {
+            match self.resources_by_name.get(name) {
                 Some(t) => result.push(t),
                 None => {}
             }

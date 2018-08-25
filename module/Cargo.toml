@@ -9,4 +9,4 @@ description = "Small building block for modularized applications."
 log = "0.4"
 
 [dev-dependencies]
-lazy_static = "1.0"
+lazy_static = "1.1"
